@@ -1,0 +1,8 @@
+[image]
+canvas_size_pxls = 28
+
+
+[neural_net]
+neurons_in_hidden_layer = 10
+total_epochs = 2_000
+lr = 0.1
