@@ -1,552 +1,188 @@
-use std::path::Path;
-use std::fs::{File, read_dir, create_dir};
+use nalgebra::{SMatrix, SVector};
+use serde::{Deserialize, Serialize};
+use std::fs::File;
 use std::io;
-use std::io::{BufReader, BufWriter, Read, Write};
-use rayon::prelude::*;
-use byteorder::{LittleEndian, ReadBytesExt};
-use serde_derive::Deserialize;
-use config::Config as ConfigBuilder;
-use lazy_static::lazy_static;
-use std::sync::RwLock;
 
-#[cfg(test)]
-mod tests;
-
-const CANVAS_SIZE: usize = 28;
+pub mod drawing;
+pub mod utils;
 
 
-#[derive(Debug, Deserialize, Clone)]
-pub struct ImageConfig {
-    pub canvas_size_pxls: usize,
+#[derive(Serialize, Deserialize, Debug)]
+pub struct WeightsStruct<const NEURONS_IN_HIDDEN_LAYER: usize, const PIXELS_PER_IMG: usize> {
+    b_in: SMatrix<f64, NEURONS_IN_HIDDEN_LAYER, 1>,
+    w_in: SMatrix<f64, NEURONS_IN_HIDDEN_LAYER, PIXELS_PER_IMG>,
+    b_h: SMatrix<f64, NEURONS_IN_HIDDEN_LAYER, 1>,
+    w_h: SMatrix<f64, NEURONS_IN_HIDDEN_LAYER, NEURONS_IN_HIDDEN_LAYER>,
+    b_out: SMatrix<f64, 10, 1>,
+    w_out: SMatrix<f64, 10, NEURONS_IN_HIDDEN_LAYER>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
-pub struct NeuralNetConfig {
-    pub neurons_in_hidden_layer: usize,
-    pub total_epochs: usize,
-    pub lr: f32,
+
+pub struct DWeightsStruct<const NEURONS_IN_HIDDEN_LAYER: usize, const PIXELS_PER_IMG: usize> {
+    db_in: f64,
+    dw_in: SMatrix<f64, NEURONS_IN_HIDDEN_LAYER, PIXELS_PER_IMG>,
+    db_h: f64,
+    dw_h: SMatrix<f64, NEURONS_IN_HIDDEN_LAYER, NEURONS_IN_HIDDEN_LAYER>,
+    db_out: f64,
+    dw_out: SMatrix<f64, 10, NEURONS_IN_HIDDEN_LAYER>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
-pub struct Config {
-    pub image: ImageConfig,
-    pub neural_net: NeuralNetConfig,
+
+pub struct ParamsStruct<const NEURONS_IN_HIDDEN_LAYER: usize, const N_PICTURES: usize> {
+    z1: SMatrix<f64, NEURONS_IN_HIDDEN_LAYER, N_PICTURES>,
+    a1: SMatrix<f64, NEURONS_IN_HIDDEN_LAYER, N_PICTURES>,
+    z2: SMatrix<f64, NEURONS_IN_HIDDEN_LAYER, N_PICTURES>,
+    a2: SMatrix<f64, NEURONS_IN_HIDDEN_LAYER, N_PICTURES>,
+    pub a3: SMatrix<f64, 10, N_PICTURES>,
 }
 
-lazy_static!{
-    pub static ref SETTINGS: RwLock<Config> = RwLock::new(load_config());
+
+pub fn init_weights<const NEURONS_IN_HIDDEN_LAYER: usize, const PIXELS_PER_IMG: usize>()
+    -> WeightsStruct<NEURONS_IN_HIDDEN_LAYER, PIXELS_PER_IMG>
+{
+    let b_in = SMatrix::<f64, NEURONS_IN_HIDDEN_LAYER, 1>::new_random() - SMatrix::<f64, NEURONS_IN_HIDDEN_LAYER, 1>::from_element(0.5);
+    let w_in = SMatrix::<f64, NEURONS_IN_HIDDEN_LAYER, PIXELS_PER_IMG>::new_random() - SMatrix::<f64, NEURONS_IN_HIDDEN_LAYER, PIXELS_PER_IMG>::from_element(0.5);
+
+    let b_h = SMatrix::<f64, NEURONS_IN_HIDDEN_LAYER, 1>::new_random() - SMatrix::<f64, NEURONS_IN_HIDDEN_LAYER, 1>::from_element(0.5);
+    let w_h = SMatrix::<f64, NEURONS_IN_HIDDEN_LAYER, NEURONS_IN_HIDDEN_LAYER>::new_random() - SMatrix::<f64, NEURONS_IN_HIDDEN_LAYER, NEURONS_IN_HIDDEN_LAYER>::from_element(0.5);
+
+    let b_out = SMatrix::<f64, 10, 1>::new_random() - SMatrix::<f64, 10, 1>::from_element(0.5);
+    let w_out = SMatrix::<f64, 10, NEURONS_IN_HIDDEN_LAYER>::new_random() - SMatrix::<f64, 10, NEURONS_IN_HIDDEN_LAYER>::from_element(0.5);
+
+    WeightsStruct::<NEURONS_IN_HIDDEN_LAYER, PIXELS_PER_IMG> { b_in, w_in, b_h, w_h, b_out, w_out }
 }
 
-pub fn load_config() -> Config {
-    let config = ConfigBuilder::builder()
-        .add_source(config::File::with_name("config"))
-        .build()
-        .expect("Failed to build configuration");
 
-    config.try_deserialize().expect("Failed to deserialize configuration")
+pub fn load_weights<const NEURONS_IN_HIDDEN_LAYER: usize, const PIXELS_PER_IMG: usize>(
+    path: &str,
+) -> WeightsStruct<NEURONS_IN_HIDDEN_LAYER, PIXELS_PER_IMG> {
+    // Open the file in read mode
+    let file = File::open(path).unwrap();
+    let reader = io::BufReader::new(file);
+
+    // Deserialize the data from the file using bincode
+    bincode::deserialize_from(reader).unwrap()
 }
 
-pub fn get_config() -> Config {
-    SETTINGS.read().unwrap().clone()
+pub fn save_weights<const NEURONS_IN_HIDDEN_LAYER: usize, const PIXELS_PER_IMG: usize>(
+    weights: &WeightsStruct<NEURONS_IN_HIDDEN_LAYER, PIXELS_PER_IMG>,
+    path: &str,
+) -> io::Result<()> {
+    // Open the file in write mode
+    let file = File::create(path)?;
+    let writer = io::BufWriter::new(file);
+
+    // Serialize the data into the file using bincode
+    bincode::serialize_into(writer, weights)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
 }
 
-pub fn is_path_exist(path: &str) -> bool{
-    let path = Path::new(path);
-    path.exists()
-}
+pub fn forward_pass<const NEURONS_IN_HIDDEN_LAYER: usize, const PIXELS_PER_IMG: usize, const N_PICTURES: usize>(
+    x_matrix: &SMatrix<f64, PIXELS_PER_IMG, N_PICTURES>,
+    weights: &WeightsStruct<NEURONS_IN_HIDDEN_LAYER, PIXELS_PER_IMG>,
+) ->
+    ParamsStruct<NEURONS_IN_HIDDEN_LAYER, N_PICTURES>
+{
+    // np.exp(Z) / sum(np.exp(Z))
+    pub fn softmax<const N_PICTURES: usize>(matrix: &mut SMatrix::<f64, 10, N_PICTURES>) {
+        matrix.iter_mut().for_each(|x| *x = x.exp());
 
-pub fn create_fldrs_if_not_exist(base_dir: &str, flders_to_create: Vec<String>) {
-    for i in flders_to_create{
-        let folder_name = format!("{}{}", base_dir, i);
-        let path = Path::new(&folder_name);
+        let col_sum = matrix.row_sum();
 
-        if !path.exists() {
-            match create_dir(path) {
-                Ok(_) => println!("Created directory: {}", folder_name),
-                Err(e) => println!("Failed to create directory {}: {}", folder_name, e),
-            }
-        } else {
-            println!("Directory {} already exists", folder_name);
+        for mut row in matrix.row_iter_mut() {
+            row.component_div_assign(&col_sum);
         }
     }
-}
 
-pub fn count_total_number_of_files() -> usize{
-    fn count_files_in_directory(path: &str) -> Result<usize, std::io::Error> {
-        let path = Path::new(path);
-        let mut file_count = 0;
+    let b_in_matrix: SMatrix<f64, NEURONS_IN_HIDDEN_LAYER, N_PICTURES> = SMatrix::from_fn(|row, _| weights.b_in[row]);
+    let z1 = weights.w_in * x_matrix + b_in_matrix;
+    let a1 = z1.map(|elem| elem.max(0.0));
 
-        if path.is_dir() {
-            for entry in read_dir(path)? {
-                let entry = entry?;
-                let file_type = entry.file_type()?;
+    let b_h_matrix: SMatrix<f64, NEURONS_IN_HIDDEN_LAYER, N_PICTURES> = SMatrix::from_fn(|row, _| weights.b_h[row]);
+    let z2 = weights.w_h * a1 + b_h_matrix;
+    let a2 = z2.map(|elem| elem.max(0.0));
 
-                if file_type.is_file() {
-                    file_count += 1;
-                }
-            }
-        } else {
-            println!("The provided path is not a directory.");
-        }
-
-        Ok(file_count)
-    }
-
-    let mut result = 0;
-
-    for i in 0..10{
-        result+=count_files_in_directory(&format!("data/{i}/")).unwrap();
-    }
-
-    result
-}
-
-
-pub fn one_hot(y: &Vec<usize>) -> Vec<Vec<f32>> {
-    let num_classes = 10;
-    let len = y.len();
-
-    let mut one_hot_y: Vec<Vec<f32>> = vec![vec![0.0; len]; num_classes];
-
-    one_hot_y.par_iter_mut().enumerate().for_each(|(label, row)| {
-        y.iter()
-            .enumerate()
-            .filter(|&(_, &y_label)| y_label == label)
-            .for_each(|(i, _)| {
-                row[i] = 1.0_f32;
-            });
-    });
-
-    one_hot_y
-}
-
-
-pub fn transpose(matrix: &[Vec<f32>]) -> Vec<Vec<f32>> {
-    let rows = matrix.len();
-    let cols = matrix[0].len();
-
-    let mut transposed = vec![vec![0.0; rows]; cols];
-
-    transposed.par_iter_mut().enumerate().for_each(|(j, row)| {
-        row.iter_mut().enumerate().for_each(|(i, elem)| {
-            *elem = matrix[i][j];
-        });
-    });
-
-    transposed
-}
-
-
-pub fn mtrix_minus_in_place(left: &mut [Vec<f32>], right: &[Vec<f32>]) {
-    assert_eq!(left.len(), right.len());
-    assert_eq!(left[0].len(), right[0].len());
-
-    left.par_iter_mut()
-        .zip(right.par_iter())
-        .for_each(|(left_row, right_row)| {
-            left_row.iter_mut()
-                .zip(right_row.iter())
-                .for_each(|(left_elem, right_elem)| {
-                    *left_elem -= right_elem;
-                });
-        });
-}
-
-
-pub fn mtrix_mult(left: &Vec<Vec<f32>>, right: &Vec<Vec<f32>>) -> Vec<Vec<f32>> {
-    assert_eq!(left.len(), right.len());
-    assert_eq!(left[0].len(), right[0].len());
-
-    let result: Vec<Vec<f32>> = left
-        .par_iter()
-        .zip(right.par_iter())
-        .map(|(row_left, row_right)| {
-            row_left
-                .par_iter()
-                .zip(row_right.par_iter())
-                .map(|(val_left, val_right)| val_left * val_right)
-                .collect()
-        })
-        .collect();
-
-    result
-}
-
-
-pub fn mtrix_dot(left: &Vec<Vec<f32>>, right: &Vec<Vec<f32>>) -> Vec<Vec<f32>> {
-    assert_eq!(left[0].len(), right.len());
-
-    let left_len = left.len();
-    let right_inner_len = right.len();
-    let right_len = right[0].len();
-
-    let mut result = vec![vec![0.0_f32; right_len]; left_len];
-
-    result.par_iter_mut().enumerate().for_each(|(i, row)| {
-        for j in 0..right_len {
-            for k in 0..right_inner_len {
-                row[j] += left[i][k] * right[k][j];
-            }
-        }
-    });
-
-    result
-}
-
-pub fn mtrix_scale_by_c(cnst: f32, matrix: &mut Vec<Vec<f32>>) {
-    matrix.par_iter_mut().for_each(|row| {
-        row.par_iter_mut().for_each(|elem| {
-            *elem *= cnst;
-        });
-    });
-}
-
-pub fn mtrix_np_sum(mtrix: &Vec<Vec<f32>>) -> Vec<Vec<f32>> {
-    mtrix.par_iter()
-        .map(|row| vec![row.par_iter().sum::<f32>()])
-        .collect()
-}
-
-pub fn relu_deriv(matrix: &[Vec<f32>]) -> Vec<Vec<f32>> {
-    matrix.par_iter()
-        .map(|row| {
-            row.par_iter()
-                .map(|&val| (val > 0.0) as u8 as f32)
-                .collect()
-        })
-        .collect()
-}
-
-
-pub fn linear_combination(b: &Vec<Vec<f32>>, w: &Vec<Vec<f32>>, x: &Vec<Vec<f32>>) -> Vec<Vec<f32>>{
-    assert_eq!(w[0].len(), x.len());
-    assert_eq!(w.len(), b.len());
-
-    let m = w.len();
-    let n = x[0].len();
-
-    let mut result = vec![vec![0.0; n]; m];
-
-    result.par_iter_mut().enumerate().for_each(|(i, row)| {
-        for j in 0..n {
-            row[j] = w[i].iter().zip(x.iter()).map(|(wi_k, x_kj)| wi_k * x_kj[j]).sum::<f32>() + b[i][0];
-        }
-    });
-    result
-}
-
-
-pub fn relu(x: &Vec<Vec<f32>>) -> Vec<Vec<f32>>{
-    x.par_iter()
-        .map(|row| {
-            row.par_iter()
-                .map(|&elem| elem.max(0.0))
-                .collect()
-        })
-        .collect()
-}
-
-
-
-// np.exp(Z) / sum(np.exp(Z))
-pub fn softmax(x: &mut Vec<Vec<f32>>) {
-    let num_cols = x[0].len();
-
-    let max_values: Vec<f32> = (0..num_cols)
-        .into_par_iter()
-        .map(|col| x.iter().map(|row| row[col]).fold(f32::NEG_INFINITY, f32::max))
-        .collect();
-
-    x.par_iter_mut().for_each(|row| {
-        row.iter_mut().enumerate().for_each(|(col, val)| {
-            *val = f32::exp(*val - max_values[col]);
-        });
-    });
-
-    let column_sums: Vec<f32> = (0..num_cols)
-        .into_par_iter()
-        .map(|col| x.iter().map(|row| row[col]).sum())
-        .collect();
-
-    x.par_iter_mut().for_each(|row| {
-        row.iter_mut().enumerate().for_each(|(col, val)| {
-            *val /= column_sums[col];
-        });
-    });
-}
-
-
-pub fn get_predictions(a2: &Vec<Vec<f32>>) -> Vec<usize> {
-    (0..a2[0].len()).into_par_iter().map(|col| {
-        let mut prediction: usize = 0;
-        let mut max_val = a2[0][col];
-        for row in 1..a2.len() {
-            if a2[row][col] > max_val {
-                max_val = a2[row][col];
-                prediction = row;
-            }
-        }
-        prediction
-    }).collect()
-}
-
-
-pub fn get_accuracy(predictions: &Vec<usize>, y_matrix: &Vec<usize>) -> f32{
-    assert_eq!(predictions.len(), y_matrix.len());
-
-    let sum: usize = predictions.par_iter()
-                                .zip(y_matrix.par_iter())
-                                .filter(|(p, y)| p == y)
-                                .count();
-
-    (sum as f32) / (predictions.len() as f32)
-}
-
-
-pub fn read_file_to_matrix(path: &str, n_file: usize, pixels_per_img: usize) -> Result<(Vec<Vec<f32>>, Vec<usize>), Box<dyn std::error::Error>> {
-    println!("Total number of files is: {n_file}");
-
-    // 2d array with vectors(slow af) of u8, all values are initialized 0
-    let mut picture_n = 0;
-    let mut x_matrix = vec![vec![0_f32; pixels_per_img]; n_file];
-    let mut y_matrix = vec![0_usize; n_file];
-
-    for entry in read_dir(path)? {
-        let entry = entry?;
-        let sub_path = entry.path();
-
-        if sub_path.is_dir() {
-            for sub_entry in read_dir(&sub_path)? {
-                let correct_answer: f32 = String::from(
-                    sub_path.to_str()
-                    .unwrap()
-                    .split('/')
-                    .last()
-                    .unwrap()
-                ).parse().unwrap();
-
-                let sub_entry = sub_entry?;
-                let img_path = format!("{}", sub_entry.path().display());
-
-                let file = File::open(img_path)?;
-                let mut reader = BufReader::new(file);
-                let mut ln = String::new();
-
-                // read file to EOF
-                let a = reader.read_to_string(&mut ln)?;
-                if picture_n ==0{
-                    println!("String read with length: {}", a);
-                }
-
-                // remove newlines, this call modifies String directly
-                ln.retain(|z| z != '\n');
-
-                //enumerate starts with 0
-                for (i, number) in ln.chars().enumerate() {
-                    match number{
-                        '0' => continue,
-                        '1' => x_matrix[picture_n][i]=1.0_f32,
-                        _ => panic!()
-                    }
-                }
-                y_matrix[picture_n]=correct_answer as usize;
-                picture_n+=1;
-            }
-        }
-    }
-    Ok((transpose(&x_matrix), y_matrix))
-}
-
-
-
-pub fn forward_pass(b_in: &Vec<Vec<f32>>, w_in: &Vec<Vec<f32>>, b_h: &Vec<Vec<f32>>, w_h: &Vec<Vec<f32>>, b_out: &Vec<Vec<f32>>, w_out: &Vec<Vec<f32>>, x_matrix: &Vec<Vec<f32>>) -> (Vec<Vec<f32>>, Vec<Vec<f32>>, Vec<Vec<f32>>, Vec<Vec<f32>>, Vec<Vec<f32>>)  {
-    let z1 = linear_combination(b_in, w_in, x_matrix);
-    let a1 = relu(&z1);
-
-    let z2 = linear_combination(b_h, w_h, &a1);
-    let a2 = relu(&z2);
-
-    let mut a3 = linear_combination(b_out, w_out, &a2);
+    let b_out_matrix: SMatrix<f64, 10, N_PICTURES> = SMatrix::from_fn(|row, _| weights.b_out[row]);
+    let mut a3 = weights.w_out * a2 + b_out_matrix;
     softmax(&mut a3);
-    (z1, a1, z2, a2, a3)
+
+    ParamsStruct::<NEURONS_IN_HIDDEN_LAYER, N_PICTURES> { z1, a1, z2, a2, a3 }
 }
 
 
-pub fn save_weights(b_in: &[Vec<f32>], w_in: &[Vec<f32>], b_h: &[Vec<f32>], w_h: &[Vec<f32>], b_out: &[Vec<f32>], w_out: &[Vec<f32>], path: &str) -> io::Result<()> {
-    let path = Path::new(path);
-    let file = File::create(path)?;
-    let mut writer = BufWriter::new(file);
+pub fn backward_pass<const PIXELS_PER_IMG: usize, const N_PICTURES: usize, const NEURONS_IN_HIDDEN_LAYER: usize>(
+    x: &SMatrix<f64, PIXELS_PER_IMG, N_PICTURES>,
+    one_hot_y: &SMatrix<f64, 10, N_PICTURES>,
+    weights: &WeightsStruct<NEURONS_IN_HIDDEN_LAYER, PIXELS_PER_IMG>,
+    params: &ParamsStruct<NEURONS_IN_HIDDEN_LAYER, N_PICTURES>,
+) ->
+    DWeightsStruct<NEURONS_IN_HIDDEN_LAYER, PIXELS_PER_IMG>
+{
+    let one_over_m = 1_f64 / N_PICTURES as f64;
 
-    fn write_f32_slice(writer: &mut dyn Write, slice: &[f32]) -> io::Result<()> {
-        for &value in slice {
-            writer.write_all(&value.to_le_bytes())?;
-        }
-        Ok(())
-    }
+    let dz3 = (params.a3 - one_hot_y).scale(2.0);
 
-    let dimensions = [
-        b_in.len() as u32,
-        b_in[0].len() as u32,
-        w_in.len() as u32,
-        w_in[0].len() as u32,
-        b_h.len() as u32,
-        b_h[0].len() as u32,
-        w_h.len() as u32,
-        w_h[0].len() as u32,
-        b_out.len() as u32,
-        b_out[0].len() as u32,
-        w_out.len() as u32,
-        w_out[0].len() as u32,
-    ];
+    let dw_out = (dz3 * params.a2.transpose()).scale(one_over_m);
 
-    for &dim in &dimensions {
-        writer.write_all(&dim.to_le_bytes())?;
-    }
+    let db_out = dz3.sum() * one_over_m;
 
-    for matrix in &[b_in, w_in, b_h, w_h, b_out, w_out] {
-        for row in *matrix {
-            write_f32_slice(&mut writer, row)?;
-        }
-    }
-    writer.flush()?;
-    Ok(())
-}
+    let dz2 = (weights.w_out.transpose() * dz3).component_mul(&params.z2.map(|z| if z > 0.0 { 1.0 } else { 0.0 }));
 
-pub fn load_weights(path: &str) -> io::Result<(Vec<Vec<f32>>, Vec<Vec<f32>>, Vec<Vec<f32>>, Vec<Vec<f32>>, Vec<Vec<f32>>, Vec<Vec<f32>>)> {
-    fn read_matrix(reader: &mut impl Read, matrix: &mut Vec<Vec<f32>>) -> io::Result<()> {
-        for row in matrix.iter_mut() {
-            for value in row.iter_mut() {
-                *value = reader.read_f32::<LittleEndian>()?;
-            }
-        }
-        Ok(())
-    }
+    let dw_h = (dz2 * params.a1.transpose()).scale(one_over_m);
 
-    let file = File::open(Path::new(path))?;
-    let mut reader = BufReader::new(file);
+    let db_h = dz2.sum() * one_over_m;
 
-    let dimensions: Vec<usize> = (0..12)
-        .map(|_| reader.read_u32::<LittleEndian>().map(|d| d as usize))
-        .collect::<io::Result<_>>()?;
+    let dz1 = (weights.w_h.transpose() * dz2).component_mul(&params.z1.map(|z| if z > 0.0 { 1.0 } else { 0.0 }));
 
-    let mut b_in = vec![vec![0.0; dimensions[1]]; dimensions[0]];
-    let mut w_in = vec![vec![0.0; dimensions[3]]; dimensions[2]];
-    let mut b_h = vec![vec![0.0; dimensions[5]]; dimensions[4]];
-    let mut w_h = vec![vec![0.0; dimensions[7]]; dimensions[6]];
-    let mut b_out = vec![vec![0.0; dimensions[9]]; dimensions[8]];
-    let mut w_out = vec![vec![0.0; dimensions[11]]; dimensions[10]];
+    let dw_in = (dz1 * x.transpose()).scale(one_over_m);
 
-    read_matrix(&mut reader, &mut b_in)?;
-    read_matrix(&mut reader, &mut w_in)?;
+    let db_in = dz1.sum() * one_over_m;
 
-    read_matrix(&mut reader, &mut b_h)?;
-    read_matrix(&mut reader, &mut w_h)?;
-
-    read_matrix(&mut reader, &mut b_out)?;
-    read_matrix(&mut reader, &mut w_out)?;
-    Ok((b_in, w_in, b_h, w_h, b_out, w_out))
-}
-
-
-pub fn save_canvas(canvas: &[u32], path: &str) -> io::Result<()> {
-    let file = File::create(path)?;
-    let mut writer = BufWriter::new(file);
-
-    let mut buffer = String::with_capacity(canvas.len());
-
-    for &value in canvas {
-        let mapped_value = match value {
-            0xFFFFFF => '0',
-            0x000000 => '1',
-            _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "Unrecognized value in buffer")),
-        };
-        buffer.push(mapped_value);
-    }
-
-    writer.write_all(buffer.as_bytes())?;
-    writer.flush()?;
-    Ok(())
-}
-
-
-pub fn canvas_to_matrix(canvas: &[u32]) -> Vec<Vec<f32>>{
-    let chunk_count = (canvas.len() + CANVAS_SIZE - 1) / CANVAS_SIZE;
-    let mut result = Vec::with_capacity(chunk_count * CANVAS_SIZE);
-
-    let white = vec![0.0];
-    let black = vec![1.0];
-
-    for &value in canvas {
-        match value {
-            0xFFFFFF => result.push(white.clone()),
-            0x000000 => result.push(black.clone()),
-            _ => panic!(),
-        }
-    }
-
-    result
-}
-
-
-pub fn clear_canvas(canvas: &mut [u32]) {
-    for el in canvas{
-        *el = 0xFFFFFF;
+    DWeightsStruct::<NEURONS_IN_HIDDEN_LAYER, PIXELS_PER_IMG> {
+        db_in,
+        dw_in,
+        db_h,
+        dw_h,
+        db_out,
+        dw_out,
     }
 }
 
 
-// gpt shit
-pub fn zoom_canvas(original: &[u32; CANVAS_SIZE * CANVAS_SIZE], orig_width: usize, orig_height: usize, scale_x: usize, scale_y: usize, target_width: usize, target_height: usize) -> Vec<u32> {
-    let mut zoomed = vec![0xFFFFFF; target_width * target_height]; // Default to white
+pub fn update_params<const NEURONS_IN_HIDDEN_LAYER: usize, const PIXELS_PER_IMG: usize>(
+    weigh: &mut WeightsStruct<NEURONS_IN_HIDDEN_LAYER, PIXELS_PER_IMG>,
+    d: &DWeightsStruct<NEURONS_IN_HIDDEN_LAYER, PIXELS_PER_IMG>,
+    lr: f64,
+) {
+    weigh.b_in.apply(|b| *b -= d.db_in * lr);
+    weigh.w_in -= d.dw_in.scale(lr);
 
-    for orig_y in 0..orig_height {
-        for orig_x in 0..orig_width {
-            let color = original[orig_y * orig_width + orig_x];
-            let start_x = orig_x * scale_x;
-            let start_y = orig_y * scale_y;
+    weigh.b_h.apply(|b| *b -= d.db_h * lr);
+    weigh.w_h -= d.dw_h.scale(lr);
 
-            for dy in 0..scale_y {
-                for dx in 0..scale_x {
-                    let x = start_x + dx;
-                    let y = start_y + dy;
+    weigh.b_out.apply(|b| *b -= d.db_out * lr);
+    weigh.w_out -= d.dw_out.scale(lr);
+}
 
-                    if x < target_width && y < target_height {
-                        zoomed[y * target_width + x] = color;
-                    }
-                }
-            }
-        }
-    }
-    zoomed
+pub fn get_predictions<const N_PICTURES: usize>(
+    a3: &SMatrix<f64, 10, N_PICTURES>
+) ->
+    SVector<u8, N_PICTURES>
+{
+    SVector::<u8, N_PICTURES>::from_fn(|col, _| a3.column(col).argmax().0 as u8)
 }
 
 
-pub fn draw_line(canvas: &mut [u32; CANVAS_SIZE * CANVAS_SIZE], x0: usize, y0: usize, x1: usize, y1: usize) {
-    let dx = (x1 as isize - x0 as isize).abs();
-    let sx = if x0 < x1 { 1 } else { -1 };
-    let dy = -(y1 as isize - y0 as isize).abs();
-    let sy = if y0 < y1 { 1 } else { -1 };
-    let mut err = dx + dy;
-    let mut x0 = x0 as isize;
-    let mut y0 = y0 as isize;
+pub fn get_accuracy<const N_PICTURES: usize>(
+    predictions: &SVector<u8, N_PICTURES>,
+    y_matrix: &SVector<u8, N_PICTURES>,
+) -> f64 {
+    // println!("predictions: {:?}", predictions.sum());
+    let correct = predictions
+        .iter()
+        .zip(y_matrix.iter())
+        .filter(|(&p, &y)| p == y)
+        .count();
 
-    loop {
-        if x0 >= 0 && x0 < CANVAS_SIZE as isize && y0 >= 0 && y0 < CANVAS_SIZE as isize {
-            canvas[y0 as usize * CANVAS_SIZE + x0 as usize] = 0x000000; // Draw black
-        }
-
-        if x0 == x1 as isize && y0 == y1 as isize {
-            break;
-        }
-
-        let e2 = 2 * err;
-        if e2 >= dy {
-            err += dy;
-            x0 += sx;
-        }
-        if e2 <= dx {
-            err += dx;
-            y0 += sy;
-        }
-    }
+    correct as f64 / N_PICTURES as f64
 }

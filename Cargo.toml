@@ -1,16 +1,11 @@
 [package]
-name = "digit_ocr_nn"
+name = "Rust_OCR"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-rand = "*"
-serde_json = "*"
-serde = { version = "*", features = ["derive"] }
-serde_derive = "*"
-config = "*"
+nalgebra = { version = "*", features = ["rand", "serde-serialize"] }
+bincode = "*"
+serde = { version = "1.0.216", features = ["derive"] }
 minifb = "*"
-walkdir = "*"
-rayon = "*"
-byteorder = "*"
-lazy_static = "*"
+

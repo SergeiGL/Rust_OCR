@@ -1,16 +1,16 @@
 use minifb::{Key, MouseButton, MouseMode, Window, WindowOptions};
-use digit_ocr_nn::{*};
+use Rust_OCR::drawing::*;
+use Rust_OCR::utils::*;
 
-
-const WIDTH: usize = 280; // Width of the window
-const HEIGHT: usize = WIDTH; // Height of the window
-const CANVAS_SIZE: usize = 28; // Size of the canvas, 30x30
-
+const WIDTH: usize = 280;
+const HEIGHT: usize = WIDTH;
+const CANVAS_SIZE: usize = 28;
+const PIXELS_PER_IMG: usize = CANVAS_SIZE * CANVAS_SIZE;
 
 
 fn main() {
     create_fldrs_if_not_exist("data/", (0..10).map(|i| i.to_string()).collect());
-    let mut number_to_draw:i32 = 0;
+    let mut number_to_draw: i32 = 0;
 
     let zoom_scale_x = WIDTH / CANVAS_SIZE;
     let zoom_scale_y = HEIGHT / CANVAS_SIZE;
@@ -22,12 +22,12 @@ fn main() {
         let mut canvas: [u32; CANVAS_SIZE * CANVAS_SIZE] = [0xFFFFFF; CANVAS_SIZE * CANVAS_SIZE];
 
         let mut window = Window::new(&format!("{}", number_to_draw),
-            WIDTH,
-            HEIGHT,
-            WindowOptions {
-                resize: false,
-                ..WindowOptions::default()
-            }).unwrap();
+                                     WIDTH,
+                                     HEIGHT,
+                                     WindowOptions {
+                                         resize: false,
+                                         ..WindowOptions::default()
+                                     }).unwrap();
 
         'number_drawing: loop {
             let zoomed_canvas = zoom_canvas(&canvas, CANVAS_SIZE, CANVAS_SIZE, zoom_scale_x, zoom_scale_y, WIDTH, HEIGHT);
@@ -36,7 +36,7 @@ fn main() {
                 if let Some((x, y)) = window.get_mouse_pos(MouseMode::Discard) {
                     let (x, y) = (x as usize, y as usize);
                     if let Some((lx, ly)) = last_mouse_pos {
-                        draw_line(&mut canvas, lx / zoom_scale_x, ly / zoom_scale_y, x / zoom_scale_x, y / zoom_scale_y);
+                        draw_line::<CANVAS_SIZE, PIXELS_PER_IMG>(&mut canvas, lx / zoom_scale_x, ly / zoom_scale_y, x / zoom_scale_x, y / zoom_scale_y);
                     }
                     last_mouse_pos = Some((x, y));
                 }
@@ -52,9 +52,9 @@ fn main() {
                 save_canvas(
                     &canvas,
                     &format!("data/{}/{}",
-                    number_to_draw,
-                    count_total_number_of_files() + 1))
-                .unwrap();
+                             number_to_draw,
+                             count_total_number_of_files() + 1))
+                    .unwrap();
                 clear_canvas(&mut canvas);
             }
 
@@ -63,16 +63,14 @@ fn main() {
             }
 
             if window.is_key_pressed(Key::Right, minifb::KeyRepeat::No) {
-                if number_to_draw >= 9 { break 'main; }
-                else {
+                if number_to_draw >= 9 { break 'main; } else {
                     number_to_draw += 1;
                     break 'number_drawing;
                 }
             }
 
             if window.is_key_pressed(Key::Left, minifb::KeyRepeat::No) {
-                if number_to_draw <= 0 { break 'main; }
-                else {
+                if number_to_draw <= 0 { break 'main; } else {
                     number_to_draw -= 1;
                     break 'number_drawing;
                 }
